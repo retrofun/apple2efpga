@@ -137,7 +137,8 @@ architecture datapath of apple2e_mist is
   constant CONF_STR : string :=
    "AppleII;;"&
    "S0U,NIB,Load Disk 0;"&
-   "S1U,HDV,Load HDD;"&
+   "S1U,NIB,Load Disk 1;"&
+   "S2U,HDVPO ,Load HDD;"&
    SEP&
    "O89,Write Protect,None,Disk 0,Disk 1, Disk 0&1;"&
    "O1,CPU Type,6502,65C02;"&
@@ -272,7 +273,7 @@ architecture datapath of apple2e_mist is
   signal TRACK2_RAM_WE : std_logic;
   signal TRACK2 : unsigned(5 downto 0);
   signal DISK_READY : std_logic_vector(1 downto 0);
-  signal disk_change : std_logic_vector(1 downto 0);
+  signal disk_change : std_logic_vector(2 downto 0);
   signal disk_size : std_logic_vector(63 downto 0);
   signal disk_mount : std_logic;
 
@@ -330,12 +331,13 @@ architecture datapath of apple2e_mist is
 
   -- signals to connect sd card emulation with io controller
   signal sd_lba:  std_logic_vector(31 downto 0);
-  signal sd_rd:   std_logic_vector(1 downto 0) := (others => '0');
-  signal sd_wr:   std_logic_vector(1 downto 0) := (others => '0');
-  signal sd_ack:  std_logic_vector(1 downto 0);
+  signal sd_rd:   std_logic_vector(2 downto 0) := (others => '0');
+  signal sd_wr:   std_logic_vector(2 downto 0) := (others => '0');
+  signal sd_ack:  std_logic_vector(2 downto 0);
 
   signal SD_LBA1:  std_logic_vector(31 downto 0);
   signal SD_LBA2:  std_logic_vector(31 downto 0);
+  signal SD_LBA3:  std_logic_vector(31 downto 0);
   
   -- data from io controller to sd card emulation
   signal sd_data_in: std_logic_vector(7 downto 0);
@@ -345,6 +347,7 @@ architecture datapath of apple2e_mist is
 
   signal SD_DATA_IN1: std_logic_vector(7 downto 0);
   signal SD_DATA_IN2: std_logic_vector(7 downto 0);
+  signal SD_DATA_IN3: std_logic_vector(7 downto 0);
   
   -- sd card emulation
   signal sd_cs:	std_logic;
@@ -377,8 +380,8 @@ architecture datapath of apple2e_mist is
   -- signal HDD_SECTOR : unsigned(15 downto 0);
   signal HDD_READ : std_logic;
   signal HDD_WRITE : std_logic;
-  signal HDD_MOUNTED : std_logic;
-  signal HDD_PROTECT : std_logic;
+  signal HDD_MOUNTED : std_logic := '0';
+  signal HDD_PROTECT : std_logic := '0';
   signal HDD_RAM_ADDR : unsigned(8 downto 0);
   -- signal HDD_RAM_DI : unsigned(7 downto 0);
   -- signal HDD_RAM_DO : unsigned(7 downto 0);
@@ -389,6 +392,7 @@ architecture datapath of apple2e_mist is
   signal hdd_read_pending : std_logic := '0';
   signal hdd_write_pending : std_logic := '0';
   signal cpu_wait_hdd : std_logic := '0';
+  signal old_disk_change : std_logic := '0';
 begin
 
   st_wp <= status(9 downto 8);
@@ -418,13 +422,19 @@ begin
   begin
 
     if rising_edge(CLK_14M) then
-      old_ack <= sd_ack(1);
+      old_ack <= sd_ack(2);
       hdd_read_pending <= hdd_read_pending or hdd_read;
       hdd_write_pending <= hdd_write_pending or hdd_write;
 
-      if (disk_mount='1') then
-        hdd_mounted <= '1';
-        hdd_protect <= '1';
+      old_disk_change <= DISK_CHANGE(2);
+      if (old_disk_change='0' and DISK_CHANGE(2)='1') then
+        if (disk_mount='0') then
+          hdd_mounted <= '0';
+          hdd_protect <= '0';
+        else
+          hdd_mounted <= '1';
+          hdd_protect <= '1';
+        end if;
       end if;
 
       if (reset='1') then
@@ -432,23 +442,23 @@ begin
         cpu_wait_hdd <= '0';
         hdd_read_pending <= '0';
         hdd_write_pending <= '0';
-        sd_rd(1) <= '0';
-        sd_wr(1) <= '0';
+        sd_rd(2) <= '0';
+        sd_wr(2) <= '0';
       elsif (state='0') then
         if (hdd_read_pending='1' or hdd_write_pending='1') then
           state <= '1';
-          sd_rd(1) <= hdd_read_pending;
-          sd_wr(1) <= hdd_write_pending;
+          sd_rd(2) <= hdd_read_pending;
+          sd_wr(2) <= hdd_write_pending;
           cpu_wait_hdd <= '1';
         end if;
       end if;
 
-      if (old_ack='0' and sd_ack(1)='1') then
+      if (old_ack='0' and sd_ack(2)='1') then
         hdd_read_pending <= '0';
         hdd_write_pending <= '0';
-        sd_rd(1) <= '0';
-        sd_wr(1) <= '0';
-      elsif (old_ack='1' and sd_ack(1)='0') then
+        sd_rd(2) <= '0';
+        sd_wr(2) <= '0';
+      elsif (old_ack='1' and sd_ack(2)='0') then
         state <= '0';
         cpu_wait_hdd <= '0';
       end if;
@@ -646,8 +656,12 @@ begin
     );
 
   disk_mount <= '0' when disk_size = x"0000000000000000" else '1';
-  sd_lba <= SD_LBA2 when sd_rd(1) = '1' or sd_wr(1) = '1' else SD_LBA1;
-  sd_data_in <= SD_DATA_IN2 when sd_ack(1) = '1' else SD_DATA_IN1;
+  sd_lba <= SD_LBA3 when sd_rd(2) = '1' or sd_wr(2) = '1' else
+            SD_LBA2 when sd_rd(1) = '1' or sd_wr(1) = '1' else
+            SD_LBA1;
+  sd_data_in <= SD_DATA_IN3 when sd_ack(2) = '1' else
+                SD_DATA_IN2 when sd_ack(1) = '1' else
+                SD_DATA_IN1;
   
   sdcard_interface1: mist_sd_card port map (
     clk          => CLK_14M,
@@ -676,13 +690,40 @@ begin
     sd_ack       => sd_ack(0)
   );
 
+  sdcard_interface2: mist_sd_card port map (
+    clk          => CLK_14M,
+    reset        => reset,
+
+    ram_addr     => TRACK2_RAM_ADDR, -- in unsigned(12 downto 0);
+    ram_di       => TRACK2_RAM_DI,   -- in unsigned(7 downto 0);
+    ram_do       => TRACK2_RAM_DO,   -- out unsigned(7 downto 0);
+    ram_we       => TRACK2_RAM_WE,
+
+    track        => std_logic_vector(TRACK2),
+    busy         => TRACK2_RAM_BUSY,
+    change       => DISK_CHANGE(1),
+    mount        => disk_mount,
+    ready        => DISK_READY(1),
+    active       => D2_ACTIVE,
+
+    sd_buff_addr => sd_buff_addr,
+    sd_buff_dout => sd_data_out,
+    sd_buff_din  => SD_DATA_IN2,
+    sd_buff_wr   => sd_data_out_strobe,
+
+    sd_lba       => SD_LBA2,
+    sd_rd        => sd_rd(1),
+    sd_wr        => sd_wr(1),
+    sd_ack       => sd_ack(1)
+  );
+
   LED <= not (D1_ACTIVE or D2_ACTIVE);
 
   -- HDD_SECTOR <= unsigned(sd_lba(15 downto 0));
   HDD_RAM_ADDR <= unsigned(sd_buff_addr);
   -- HDD_RAM_DI <= unsigned(sd_data_out);
   -- HDD_RAM_DO <= unsigned(sd_data_in);
-  HDD_RAM_WE <= sd_data_out_strobe and sd_ack(1);
+  HDD_RAM_WE <= sd_data_out_strobe and sd_ack(2);
 
   hdd : entity work.hdd
     port map (
@@ -694,14 +735,14 @@ begin
       RD             => not cpu_we,
       D_IN           => D,
       D_OUT          => HDD_DO,
-      std_logic_vector(sector)         => SD_LBA2, --HDD_SECTOR
+      std_logic_vector(sector)         => SD_LBA3, --HDD_SECTOR
       hdd_read       => HDD_READ,
       hdd_write      => HDD_WRITE,
       hdd_mounted    => HDD_MOUNTED,
       hdd_protect    => HDD_PROTECT,
       ram_addr       => HDD_RAM_ADDR,
       ram_di         => unsigned(sd_data_out), --HDD_RAM_DI,
-      std_logic_vector(ram_do)         => SD_DATA_IN2, --HDD_RAM_DO,
+      std_logic_vector(ram_do)         => SD_DATA_IN3, --HDD_RAM_DO,
       ram_we         => HDD_RAM_WE
       );
 
@@ -767,6 +808,7 @@ begin
   user_io_inst : user_io
     generic map (
       STRLEN => CONF_STR'length,
+      SD_IMAGES => 3,
       FEATURES => USER_IO_FEAT
     )
     port map (
