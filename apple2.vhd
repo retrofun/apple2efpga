@@ -16,6 +16,7 @@ entity apple2 is
   port (
     CLK_14M        : in  std_logic;              -- 14.31818 MHz master clock
     PALMODE        : in  std_logic := '0';       -- PAL/NTSC selection
+    CPU_WAIT       : in  std_logic;
     CLK_2M         : out std_logic;
     PHASE_ZERO     : buffer std_logic;
     PHASE_ZERO_R   : buffer std_logic;           -- next clock is PHI0=1
@@ -441,7 +442,7 @@ begin
     port map (
       mode     => "00",
       clk      => CLK_14M,
-      enable   => CPU_EN,
+      enable   => CPU_EN and (not CPU_WAIT),
       res_n    => not reset,
 
       IRQ_n    => IRQ_N,
@@ -456,7 +457,7 @@ begin
     port map (
         reset => not reset,
         clk => CLK_14M,
-        enable => CPU_EN,
+        enable => CPU_EN and (not CPU_WAIT),
         nmi_n => NMI_N,
         irq_n => IRQ_N,
         di => D_IN,

@@ -137,7 +137,7 @@ architecture datapath of apple2e_mist is
   constant CONF_STR : string :=
    "AppleII;;"&
    "S0U,NIB,Load Disk 0;"&
-   "S1U,NIB,Load Disk 1;"&
+   "S1U,HDV,Load HDD;"&
    SEP&
    "O89,Write Protect,None,Disk 0,Disk 1, Disk 0&1;"&
    "O1,CPU Type,6502,65C02;"&
@@ -148,7 +148,8 @@ architecture datapath of apple2e_mist is
    "O5,Joysticks,Normal,Swapped;"&
    "O6,Mockingboard S4,off,on;"&
    SEP&
-   "T7,Cold reset;";
+   "T7,Cold reset;"&
+   "V,Tronix v"&BUILD_DATE;
 
   component mist_sd_card
     port (
@@ -232,7 +233,7 @@ architecture datapath of apple2e_mist is
   signal IO_SELECT, DEVICE_SELECT : std_logic_vector(7 downto 0);
   signal ADDR : unsigned(15 downto 0);
   signal D, PD: unsigned(7 downto 0);
-  signal DISK_DO, PSG_DO : unsigned(7 downto 0);
+  signal DISK_DO, PSG_DO, HDD_DO : unsigned(7 downto 0);
   signal DO : std_logic_vector(15 downto 0);
   signal aux : std_logic;
   signal cpu_we : std_logic;
@@ -361,6 +362,33 @@ architecture datapath of apple2e_mist is
 
   signal ear_in : std_logic;
 
+  -- HDD control
+  -- signal HDD_SECTOR : std_logic_vector(31 downto 0);
+  -- signal HDD_READ : std_logic;
+  -- signal HDD_WRITE : std_logic;
+  -- signal HDD_MOUNTED : std_logic;
+  -- signal HDD_PROTECT : std_logic;
+  -- signal HDD_RAM_ADDR : std_logic_vector(8 downto 0);
+  -- signal HDD_RAM_DI : std_logic_vector(7 downto 0);
+  -- signal HDD_RAM_DO : std_logic_vector(7 downto 0);
+  -- signal HDD_RAM_WE : std_logic;
+
+  -- HDD control
+  -- signal HDD_SECTOR : unsigned(15 downto 0);
+  signal HDD_READ : std_logic;
+  signal HDD_WRITE : std_logic;
+  signal HDD_MOUNTED : std_logic;
+  signal HDD_PROTECT : std_logic;
+  signal HDD_RAM_ADDR : unsigned(8 downto 0);
+  -- signal HDD_RAM_DI : unsigned(7 downto 0);
+  -- signal HDD_RAM_DO : unsigned(7 downto 0);
+  signal HDD_RAM_WE : std_logic;
+
+  signal state : std_logic := '0';
+  signal old_ack : std_logic := '0';
+  signal hdd_read_pending : std_logic := '0';
+  signal hdd_write_pending : std_logic := '0';
+  signal cpu_wait_hdd : std_logic := '0';
 begin
 
   st_wp <= status(9 downto 8);
@@ -385,6 +413,47 @@ begin
   end process;
   
   SDRAM_CLK <= CLK_28M;
+
+  hd_operate : process(CLK_14M)
+  begin
+
+    if rising_edge(CLK_14M) then
+      old_ack <= sd_ack(1);
+      hdd_read_pending <= hdd_read_pending or hdd_read;
+      hdd_write_pending <= hdd_write_pending or hdd_write;
+
+      if (disk_mount='1') then
+        hdd_mounted <= '1';
+        hdd_protect <= '1';
+      end if;
+
+      if (reset='1') then
+        state <= '0';
+        cpu_wait_hdd <= '0';
+        hdd_read_pending <= '0';
+        hdd_write_pending <= '0';
+        sd_rd(1) <= '0';
+        sd_wr(1) <= '0';
+      elsif (state='0') then
+        if (hdd_read_pending='1' or hdd_write_pending='1') then
+          state <= '1';
+          sd_rd(1) <= hdd_read_pending;
+          sd_wr(1) <= hdd_write_pending;
+          cpu_wait_hdd <= '1';
+        end if;
+      end if;
+
+      if (old_ack='0' and sd_ack(1)='1') then
+        hdd_read_pending <= '0';
+        hdd_write_pending <= '0';
+        sd_rd(1) <= '0';
+        sd_wr(1) <= '0';
+      elsif (old_ack='1' and sd_ack(1)='0') then
+        state <= '0';
+        cpu_wait_hdd <= '0';
+      end if;
+    end if;
+  end process;
   
   pll : entity work.mist_clk 
   port map (
@@ -475,11 +544,16 @@ begin
   ram_addr <= "000000000" & std_logic_vector(a_ram) when status(7) = '0' else std_logic_vector(to_unsigned(1012,ram_addr'length)); -- $3F4
   ram_di   <= std_logic_vector(D) when status(7) = '0' else "00000000";
 
-  PD <= PSG_DO when IO_SELECT(4) = '1' else DISK_DO;
+  -- PD <= PSG_DO when IO_SELECT(4) = '1' else DISK_DO;
+
+  PD <= PSG_DO when IO_SELECT(4) = '1' and status(6) = '1' else
+        HDD_DO when IO_SELECT(7) = '1' or DEVICE_SELECT(7) = '1' else
+        DISK_DO;
 
   core : entity work.apple2 port map (
     CLK_14M        => CLK_14M,
     PALMODE        => status(4),
+    CPU_WAIT       => cpu_wait_hdd,
     CLK_2M         => CLK_2M,
     PHASE_ZERO     => PHASE_ZERO,
     PHASE_ZERO_R   => PHASE_ZERO_R,
@@ -602,34 +676,34 @@ begin
     sd_ack       => sd_ack(0)
   );
 
-  sdcard_interface2: mist_sd_card port map (
-    clk          => CLK_14M,
-    reset        => reset,
-
-    ram_addr     => TRACK2_RAM_ADDR, -- in unsigned(12 downto 0);
-    ram_di       => TRACK2_RAM_DI,   -- in unsigned(7 downto 0);
-    ram_do       => TRACK2_RAM_DO,   -- out unsigned(7 downto 0);
-    ram_we       => TRACK2_RAM_WE,
-
-    track        => std_logic_vector(TRACK2),
-    busy         => TRACK2_RAM_BUSY,
-    change       => DISK_CHANGE(1),
-    mount        => disk_mount,
-    ready        => DISK_READY(1),
-    active       => D2_ACTIVE,
-
-    sd_buff_addr => sd_buff_addr,
-    sd_buff_dout => sd_data_out,
-    sd_buff_din  => SD_DATA_IN2,
-    sd_buff_wr   => sd_data_out_strobe,
-
-    sd_lba       => SD_LBA2,
-    sd_rd        => sd_rd(1),
-    sd_wr        => sd_wr(1),
-    sd_ack       => sd_ack(1)
-  );
-
   LED <= not (D1_ACTIVE or D2_ACTIVE);
+
+  -- HDD_SECTOR <= unsigned(sd_lba(15 downto 0));
+  HDD_RAM_ADDR <= unsigned(sd_buff_addr);
+  -- HDD_RAM_DI <= unsigned(sd_data_out);
+  -- HDD_RAM_DO <= unsigned(sd_data_in);
+  HDD_RAM_WE <= sd_data_out_strobe and sd_ack(1);
+
+  hdd : entity work.hdd
+    port map (
+      CLK_14M        => CLK_14M,
+      IO_SELECT      => IO_SELECT(7),
+      DEVICE_SELECT  => DEVICE_SELECT(7),
+      RESET          => reset,
+      A              => ADDR,
+      RD             => not cpu_we,
+      D_IN           => D,
+      D_OUT          => HDD_DO,
+      std_logic_vector(sector)         => SD_LBA2, --HDD_SECTOR
+      hdd_read       => HDD_READ,
+      hdd_write      => HDD_WRITE,
+      hdd_mounted    => HDD_MOUNTED,
+      hdd_protect    => HDD_PROTECT,
+      ram_addr       => HDD_RAM_ADDR,
+      ram_di         => unsigned(sd_data_out), --HDD_RAM_DI,
+      std_logic_vector(ram_do)         => SD_DATA_IN2, --HDD_RAM_DO,
+      ram_we         => HDD_RAM_WE
+      );
 
   mb : work.mockingboard
     port map (
